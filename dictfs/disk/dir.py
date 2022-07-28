@@ -18,12 +18,12 @@
 #
 from collections.abc import MutableMapping
 from functools import cached_property
-from magic import Magic
-from os import listdir, mkdir, stat, chmod, remove, rmdir
-from os.path import isdir, expanduser, abspath, join, basename
+from os import listdir
+from os.path import basename
+from pathlib import Path
 from stat import S_IMODE
-from typing import Optional
-from .file import MIME, File
+from typing import Union
+from .file import File
 
 
 class Dir(MutableMapping):
@@ -37,24 +37,21 @@ class Dir(MutableMapping):
     def path(self):
         return self._path
 
-    def __init__(self, path: Optional[str] = None, /, *, mode: int = 0o750):
-        if path is None:
-            if not isinstance(mode, int):
-                raise TypeError('invalid mode')
+    def __init__(self, path: Union[str, Path, None] = None, /, *, mode: int = 0o750):
+        if path is None:  # new directory
             self._mode = S_IMODE(mode)
             return
+        elif isinstance(path, str):
+            path = Path(path)
+        elif not isinstance(path, Path):
+            raise TypeError
 
-        path = abspath(expanduser(path))
-        if not isdir(path):
-            raise ValueError('invalid dir')
+        path = path.expanduser().absolute()
+        if not path.is_dir():
+            raise ValueError('invalid dir path')
 
         self._path = path
-        self._mode = S_IMODE(stat(path).st_mode)
-
-    def __new__(cls, *args, **kwargs):
-        if not hasattr(cls, '_magic'):  # class cached
-            cls._magic = Magic(mime=True)
-        return super().__new__(cls)
+        self._mode = S_IMODE(path.stat().st_mode)
 
     def __repr__(self):
         return f"{type(self).__name__}('{self._path}')"
@@ -65,81 +62,46 @@ class Dir(MutableMapping):
     def __len__(self):
         return len(self._content)
 
-    def __getitem__(self, key):
-        p = join(self._path, key)
-
-        try:
-            t = self._type[key]
-        except KeyError:
-            if key not in self._content_set:
-                raise
-            self._type[key] = t = None if isdir(p) else self._magic.from_file(p)
-
-        if t is None:  # open subdir
-            return type(self)(p)
-
-        try:
-            o = MIME[t]
-        except KeyError:
-            return File(path=p)
-        else:
-            return o(path=p)
+    def __getitem__(self, key: str):
+        if self._content[key]:  # open subdir
+            return type(self)(self._path / key)
+        return File(path=self._path / key)
 
     def __setitem__(self, key, value):
-        if basename(key) != key or not key:
-            raise KeyError('invalid file/dir name')
-        elif key in self._content_set:
+        if key in self._content:
             raise KeyError('file/dir already exists')
+        elif not key or basename(key) != key:
+            raise KeyError('invalid file/dir name')
 
-        p = join(self._path, key)
-        if isinstance(value, Dir):
+        p = self._path / key
+        if isinstance(value, Dir):  # new directory
             if hasattr(value, '_path'):
                 raise ValueError('empty dir object expected')
-            mkdir(p, mode=value.mode)
-            self._type[key] = None
-        elif isinstance(value, File):
+            p.mkdir(value.mode, exist_ok=False)
+            self._content[key] = True
+        elif isinstance(value, File):  # new file
             if hasattr(value, '_path'):
                 raise ValueError('empty file object expected')
-            open(p, 'a').close()  # touch file
-            chmod(p, value.mode)  # set mode
+            p.touch(value.mode, exist_ok=False)
+            self._content[key] = False
         else:
             raise TypeError('dir or file expected')
-
-        value._path = p  # set path
-        self._content.append(key)
-        self._content_set.add(key)
+        value._path = p  # bound dir/file
 
     def __delitem__(self, key):
-        if key not in self._content_set:
-            raise KeyError
-        p = join(self._path, key)
-        try:
-            if self._type.pop(key) is None:
-                rmdir(p)
-            else:
-                remove(p)
-        except KeyError:
-            if isdir(p):
-                rmdir(p)
-            else:
-                remove(p)
-        self._content.remove(key)
-        self._content_set.discard(key)
+        p = self._path / key
+        if self._content.pop(key):
+            p.rmdir()
+        else:
+            p.unlink()
 
     def refresh(self):
         self.__dict__.clear()
 
     @cached_property
     def _content(self):
-        return sorted(listdir(self._path))
-
-    @cached_property
-    def _content_set(self):
-        return set(self._content)
-
-    @cached_property
-    def _type(self):
-        return {}
+        p = self._path
+        return {k: (p / k).is_dir() for k in sorted(listdir(p))}
 
 
 __all__ = ['Dir']

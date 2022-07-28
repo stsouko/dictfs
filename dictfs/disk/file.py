@@ -16,12 +16,18 @@
 #  You should have received a copy of the GNU Lesser General Public License
 #  along with this program; if not, see <https://www.gnu.org/licenses/>.
 #
-from typing import Optional
-from s3fs import S3FileSystem
+from pathlib import Path
+from stat import S_IMODE
+from typing import Union
+from ..wrappers import *
 
 
-class S3File:
-    __slots__ = ('_path', '_s3')
+class File:
+    __slots__ = ('_path', '_mode')
+
+    @property
+    def mode(self):
+        return self._mode
 
     @property
     def path(self):
@@ -29,22 +35,28 @@ class S3File:
 
     @property
     def size(self):
-        return self._s3.size(self._path)
+        return self._path.stat().st_size
 
-    def __init__(self, *, path: Optional[str] = None, s3fs: Optional[S3FileSystem] = None):
-        if path is None:
+    def __init__(self, *, path: Union[str, Path, None] = None, mode: int = 0o640):
+        if path is None:  # new empty file
+            self._mode = S_IMODE(mode)
             return
-        elif not isinstance(path, str):
+        elif isinstance(path, str):
+            path = Path(path)
+        elif not isinstance(path, Path):
             raise TypeError
 
         self._path = path
-        self._s3 = s3fs
+        self._mode = S_IMODE(path.stat().st_mode)
 
     def __repr__(self):
         return f"{type(self).__name__}('{self._path}')"
 
     def __call__(self, *args, **kwargs):
-        return self._s3.open(self._path, *args, **kwargs)
+        return self._path.open(*args, **kwargs)
+
+    def to_image(self) -> Image:
+        return Image(self._path)
 
 
-__all__ = ['S3File']
+__all__ = ['File']

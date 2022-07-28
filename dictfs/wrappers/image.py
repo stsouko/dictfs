@@ -16,47 +16,42 @@
 #  You should have received a copy of the GNU Lesser General Public License
 #  along with this program; if not, see <https://www.gnu.org/licenses/>.
 #
-from functools import cached_property
 from inflection import underscore
+from lazy_object_proxy import Proxy
 from PIL.Image import open as popen
 from PIL.ExifTags import TAGS, GPSTAGS
-from .file import File
 
 
 gps_tag = next(k for k, v in TAGS.items() if v == 'GPSInfo')
 offset_tag = next(k for k, v in TAGS.items() if v == 'ExifOffset')
 
 
-class Image(File):
-    __slots__ = ('__dict__',)
+class Image(Proxy):
+    __slots__ = '__meta_cache__',
 
-    def __init__(self, *, path: str):
-        if path is None:
-            raise NotImplementedError('images are readonly')
-        super().__init__(path=path)
-
-    def __call__(self):
-        return self._image
+    def __init__(self, file, /):
+        self.__wrapped__ = popen(file)
 
     def __dir__(self):
-        return ['mode', 'path', 'size'] + list(self._meta)
+        return dir(self.__wrapped__) + list(self.__meta__)
 
     def __getattr__(self, attr):
         try:
-            return self._meta[attr]
-        except KeyError as e:
-            raise AttributeError from e
+            return self.__meta__[attr]
+        except KeyError:
+            return super().__getattr__(attr)
 
-    @cached_property
-    def _image(self):
-        return popen(self._path)
-
-    @cached_property
-    def _meta(self):
-        exif = self._image.getexif()
-        m = {underscore(TAGS[key]): val for key, val in exif.items() if key in TAGS}
-        m.update((underscore(GPSTAGS[key]), value) for key, value in exif.get_ifd(gps_tag).items() if key in GPSTAGS)
-        m.update((underscore(TAGS[key]), value) for key, value in exif.get_ifd(offset_tag).items() if key in TAGS)
+    @property
+    def __meta__(self):
+        if hasattr(self, '__meta_cache__'):
+            return self.__meta_cache__
+        exif = self.__wrapped__.getexif()
+        m = {'exif_' + underscore(TAGS[key]): val for key, val in exif.items() if key in TAGS}
+        m.update(('exif_' + underscore(GPSTAGS[key]), value)
+                 for key, value in exif.get_ifd(gps_tag).items() if key in GPSTAGS)
+        m.update(('exif_' + underscore(TAGS[key]), value)
+                 for key, value in exif.get_ifd(offset_tag).items() if key in TAGS)
+        self.__meta_cache__ = m
         return m
 
 

@@ -16,15 +16,4 @@
 #  You should have received a copy of the GNU Lesser General Public License
 #  along with this program; if not, see <https://www.gnu.org/licenses/>.
 #
-from .file import *
 from .image import *
-
-
-MIME = {
-    'text/plain': File,
-    'image/jpeg': Image,
-    'image/png': Image,
-}
-
-
-__all__ = ['File']

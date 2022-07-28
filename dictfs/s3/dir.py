@@ -18,15 +18,14 @@
 #
 from collections.abc import MutableMapping
 from functools import cached_property
-from magic import Magic
 from os.path import basename
 from typing import Optional
 from s3fs import S3FileSystem
-from .file import MIME, S3File
+from .file import S3File
 
 
 class S3Dir(MutableMapping):
-    __slots__ = ('_path', '_s3', '__dict__')
+    __slots__ = ('_path', '_s3', '_parent', '__dict__')
 
     @property
     def path(self):
@@ -34,23 +33,17 @@ class S3Dir(MutableMapping):
 
     def __init__(self, path: Optional[str] = None, /, s3fs: Optional[S3FileSystem] = None):
         if path is None:  # empty S3 dir
-            self._content = []
             return
         elif not isinstance(path, str):
             raise TypeError
 
-        self._s3 = s3 = S3FileSystem() if s3fs is None else s3fs
+        self._s3 = S3FileSystem() if s3fs is None else s3fs
 
         path = path.strip('/')
-        if not s3.isdir(path):
+        if not self._s3.isdir(path):
             raise ValueError('invalid dir')
+        self._parent = None
         self._path = path
-        self.refresh()
-
-    def __new__(cls, *args, **kwargs):
-        if not hasattr(cls, '_magic'):  # class cached
-            cls._magic = Magic(mime=True)
-        return super().__new__(cls)
 
     def __repr__(self):
         return f"{type(self).__name__}('{self._path}')"
@@ -62,113 +55,78 @@ class S3Dir(MutableMapping):
         return len(self._content)
 
     def __getitem__(self, key):
-        p = f'{self._path}/{key}'
-
-        try:
-            t = self._type[key]
-        except KeyError:
-            if key not in self._content_set:
-                raise
-            self._type[key] = t = None if self._s3.isdir(p) else self._check_mime(p)
-
-        if t is None:  # open subdir
-            if key in self._virtual_dirs:
-                if self._s3.isdir(p):
-                    self._virtual_dirs.discard(key)  # materialize virtual dirs
-                elif self._s3.isfile(p):  # path overridden in other dir object to file
-                    self._virtual_dirs.discard(key)
-                    self._type[key] = t = self._check_mime(p)
-                    try:
-                        o = MIME[t]
-                    except KeyError:
-                        return S3File(path=p, s3fs=self._s3)
-                    else:
-                        return o(path=p, s3fs=self._s3)
-                else:  # return virtual dir
-                    d = type(self)()
-                    d._s3 = self._s3
-                    d._path = p
-                    return d
-            try:
-                return type(self)(p, s3fs=self._s3)
-            except ValueError:
-                # dir virtualized
-                d = type(self)()
-                d._s3 = self._s3
-                d._path = p
-                self._virtual_dirs.add(key)
-                return d
-
-        try:
-            o = MIME[t]
-        except KeyError:
-            return S3File(path=p, s3fs=self._s3)
+        if self._content[key]:  # open subdir
+            o = type(self)()
+            o._parent = self
         else:
-            return o(path=p, s3fs=self._s3)
+            o = S3File()
+        o._s3 = self._s3
+        o._path = f'{self._path}/{key}'
+        return o
 
     def __setitem__(self, key, value):
-        if basename(key) != key or not key:
-            raise KeyError('invalid file/dir name')
-        elif key in self._content_set:
+        if key in self._content:
             raise KeyError('file/dir already exists')
+        elif not key or basename(key) != key:
+            raise KeyError('invalid file/dir name')
 
         p = f'{self._path}/{key}'
         if isinstance(value, S3Dir):
             if hasattr(value, '_path'):
                 raise ValueError('empty dir object expected')
-            # just add virtual dir
             self._virtual_dirs.add(key)
-            self._type[key] = None
+            self._content[key] = True
+            value._parent = self
         elif isinstance(value, S3File):
             if hasattr(value, '_path'):
                 raise ValueError('empty file object expected')
-            self._s3.touch(p)
+            self._s3.touch(p, truncate=False)
+            self._content[key] = False
+            # materialize virtual dirs up to root
+            x = self
+            while x._parent is not None:  # while not root
+                if (k := x._path.rsplit('/', maxsplit=1)[1]) in x._parent._virtual_dirs:
+                    x._parent._virtual_dirs.discard(k)
+                    x = x._parent
+                else:  # already materialized
+                    break
         else:
             raise TypeError('dir or file expected')
-        value._path = p  # set path
+        # bound dir/path
+        value._path = p
         value._s3 = self._s3
-        self._content.append(key)
-        self._content_set.add(key)
 
     def __delitem__(self, key):
-        if key not in self._content_set:
-            raise KeyError
-        p = f'{self._path}/{key}'
-        # do full validation
-        if self._s3.isdir(p):
+        if self._content.pop(key):  # directory
             if key in self._virtual_dirs:
                 self._virtual_dirs.discard(key)
-            raise OSError('Directory not empty')
-        elif self._s3.isfile(p):
-            if key in self._virtual_dirs:  # drop overriden virtual dir
-                self._virtual_dirs.discard(key)
-            self._s3.rm(p)
-        elif key in self._virtual_dirs:
-            self._virtual_dirs.discard(key)
-
-        self._type.pop(key, None)
-        self._content.remove(key)
-        self._content_set.discard(key)
+            else:
+                raise OSError('Directory not empty')
+        else:  # file
+            self._s3.rm(f'{self._path}/{key}')
+            # virtualize directories up to root
+            x = self
+            while x._parent is not None:
+                if (k := x._path.rsplit('/', maxsplit=1)[1]) not in x._parent._virtual_dirs and \
+                        len(x._virtual_dirs) == len(x._content):
+                    # mark current directory as virtual
+                    x._parent._virtual_dirs.add(k)
+                    x = x._parent
+                else:
+                    break
 
     def refresh(self):
         self.__dict__.clear()
-        s = len(self._path) + 1
-        self._content = [y for x in self._s3.ls(self._path) if (y := x[s:])]
-
-    def _check_mime(self, p):
-        return self._magic.from_buffer(self._s3.open(p, block_size=100, cache_type='none').read(100))
-
-    @cached_property
-    def _type(self):
-        return {}
+        self._s3.invalidate_cache()
 
     @cached_property
     def _virtual_dirs(self):
         return set()
 
     @cached_property
-    def _content_set(self):
-        return set(self._content)
+    def _content(self):
+        s = len(self._path) + 1
+        return {y: x['type'] == 'directory' for x in self._s3.ls(self._path, detail=True) if (y := x['name'][s:])}
 
 
 __all__ = ['S3Dir']

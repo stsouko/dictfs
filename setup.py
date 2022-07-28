@@ -23,14 +23,14 @@ from setuptools import setup, find_packages
 
 setup(
     name='dictfs',
-    version='1.0',
+    version='1.1',
     packages=find_packages(),
     url='https://github.com/stsouko/dictfs',
     license='LGPLv3',
     author='Dr. Ramil Nugmanov',
     author_email='nougmanoff@protonmail.com',
     python_requires='>=3.8',
-    install_requires=['python-magic>=0.4.24', 's3fs>=2022.1.0', 'inflection>=0.5.1', 'Pillow>=8.4.0'],
+    install_requires=['s3fs>=2022.1.0', 'lazy-object-proxy>=1.6', 'inflection>=0.5.1', 'Pillow>=8.4.0'],
     long_description=(Path(__file__).parent / 'README.rst').read_text('utf8'),
     classifiers=['Environment :: Plugins',
                  'License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)',
